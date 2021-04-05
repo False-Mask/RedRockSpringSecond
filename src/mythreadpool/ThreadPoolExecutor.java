@@ -1,6 +1,9 @@
 package mythreadpool;
 
+import javax.management.relation.RoleUnresolved;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -29,7 +32,7 @@ public class ThreadPoolExecutor {
 
     //表示状态的变量
     private static final int RUNNING    = -1 << COUNT_BITS;
-    private static final int SHUTDOWN   =  0 << COUNT_BITS;
+    private static final int SHUTDOWN   =  0;
     private static final int STOP       =  1 << COUNT_BITS;
     private static final int TIDYING    =  2 << COUNT_BITS;
     private static final int TERMINATED =  3 << COUNT_BITS;
@@ -88,10 +91,6 @@ public class ThreadPoolExecutor {
     private static boolean isRunning(int c) {
         return c < SHUTDOWN;
     }
-    //原子性-- 并获取更新后的值
-    private void decrementWorkerCount() {
-        ctl.addAndGet(-1);
-    }
 
     /**
      *线程池的构造函数 用于配置各类参数
@@ -110,7 +109,9 @@ public class ThreadPoolExecutor {
             TimeUnit unit,
             BlockingQueue<Runnable> workQueue)  {
         if (corePoolSize > maximumPoolSize){
-            //throw new ThreadPoolException("核心线程数大于最大线程数");
+            RuntimeException exception =new ThreadPoolException("核心线程数大于最大线程数");
+            exception.printStackTrace();
+            throw exception;
         }
         this.corePoolSize = corePoolSize;
         this.maximumPoolSize = maximumPoolSize;
@@ -156,7 +157,47 @@ public class ThreadPoolExecutor {
 //            if (workQueue.offer(runnable)){
 //                System.out.println("任务队列加入失败");
 //            }
+//        if (!addWorker(runnable)){
+//            try{
+//                throw new ThreadPoolException("添加ThreadPool出错");
+//            }catch (Exception e){
+//                e.printStackTrace();
+//            }
+//        }
         addWorker(runnable);
+    }
+
+    /**
+     * 将当前的状态设置为SHUTDOWN状态
+     */
+    public void shutdown(){
+        int localCtl = ctl.get();
+        ctl.set(ctlOf(SHUTDOWN,workerCountOf(localCtl)));
+        endAllWorks();
+    }
+
+    /**
+     * 将当前的任务状态设置为STOP状态
+     */
+    public List<Runnable> shutdownNow(){
+        int localCtl = ctl.get();
+        ctl.set(ctlOf(STOP,workerCountOf(localCtl)));
+        endAllWorkers();
+        return new ArrayList<>(workQueue);
+    }
+
+    private void endAllWorkers() {
+        for (Worker w : workers){
+            w.thread.interrupt();
+        }
+        workers.clear();
+    }
+
+    /**
+     * 清空所有缓存的任务队列
+     */
+    private void endAllWorks() {
+        workQueue.clear();
     }
 
     private boolean addWorker(Runnable firstTask){
@@ -169,25 +210,31 @@ public class ThreadPoolExecutor {
         //如果当前线程的数量小于核心线程数 只添加核心线程
         if (workerCountOf(c) < corePoolSize){
             Worker worker = new Worker(firstTask, true);
+            workers.add(worker);
             final Thread thread = worker.thread;
             if (thread!=null){
                 thread.start();
                 ctl.compareAndSet(c,ctlOf(RUNNING,c+1));
                 return true;
             }else {
+                workers.remove(worker);
                 return false;
             }
         }
         //如果当前线程数大于核心线程数并且小于总线程数 只添加非核心线程
         else if (workerCountOf(c) < maximumPoolSize){
             Worker worker = new Worker(firstTask,false);
+            workers.add(worker);
             final Thread thread = worker.thread;
             if (thread!=null){
                 thread.start();
                 ctl.compareAndSet(c,ctlOf(RUNNING,c+1));
                 return true;
+            }else {
+                workers.remove(worker);
+                return false;
             }
-            return false;
+
         }
         //如果当前线程数大于最大线程 那么就放入阻塞队列里面缓存
         else if (workQueue.offer(firstTask)){
@@ -197,6 +244,7 @@ public class ThreadPoolExecutor {
             ctl.compareAndSet(c,ctlOf(RUNNING,c+1));
             return true;
         }
+
         //如果大于最大容纳的数量(容纳最大线程数+阻塞队列长度)
         else {
             return false;
@@ -213,7 +261,13 @@ public class ThreadPoolExecutor {
         Runnable task = worker.runnable;
         //缓存到task以后runnable设置为null
         worker.runnable = null;
-        while( task!=null || (task = getTask(worker))!=null ){
+
+        //如果当前执行任务不为空->执行
+        //为空从阻塞队列中获取任务->执行
+        //同时需要满足处于运行状态
+
+        while( (task!=null || (task = getTask(worker))!=null) && isRunning(ctl.get()) ){
+            if ((runStateAtLeast(ctl.get(),SHUTDOWN) && runStateLessThan(ctl.get(),TIDYING))) break;;
             task.run();
             task = null;
         }
@@ -227,6 +281,7 @@ public class ThreadPoolExecutor {
      */
     private void clearTheWorker(Worker worker) {
         workers.remove(worker);
+        workers.removeIf(threadWorker -> threadWorker.thread.isInterrupted() || threadWorker.thread.isAlive());
     }
 
     private Runnable getTask(Worker worker)  {

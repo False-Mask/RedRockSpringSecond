@@ -1,6 +1,6 @@
 package mythreadpool;
 
-public class ThreadPoolException extends Exception{
+public class ThreadPoolException extends RuntimeException{
     private final String what;
 
     public ThreadPoolException(String what){
